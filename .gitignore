@@ -1,0 +1,9 @@
+node_modules/
+.env
+.notion/
+dist/
+*.tgz
+weread-skills-page.html
+weread-skills.zip
+weread-skills/
+package/
