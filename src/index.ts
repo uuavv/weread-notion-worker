@@ -8,9 +8,9 @@ export default worker;
 const WEREAD_API_URL = "https://i.weread.qq.com/api/agent/gateway";
 const SKILL_VERSION = "1.0.3";
 const PAGE_SIZE = 100;
+const BOOKS_PER_EXECUTION = numberEnv("BOOKS_PER_EXECUTION", 2);
+const NOTEBOOK_SCAN_PAGES = numberEnv("NOTEBOOK_SCAN_PAGES", 1);
 const ERROR_TEXT_LIMIT = 500;
-const BOOKS_PER_EXECUTION = numberEnv("BOOKS_PER_EXECUTION", 3);
-const NOTEBOOK_SCAN_PAGES = numberEnv("NOTEBOOK_SCAN_PAGES", 2);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -18,7 +18,6 @@ type SyncState = {
   entries: BookEntry[];
   index: number;
   errors: string[];
-  fullRefresh: boolean;
 };
 
 type BookEntry = {
@@ -47,7 +46,6 @@ type WeReadBook = JsonRecord & {
   intro?: string;
   category?: string;
   publisher?: string;
-  publishTime?: string;
   isbn?: string;
   wordCount?: number;
   newRating?: number;
@@ -56,13 +54,10 @@ type WeReadBook = JsonRecord & {
 
 type Bookmark = JsonRecord & {
   bookmarkId?: string;
-  bookId?: string;
   chapterUid?: number;
   markText?: string;
   createTime?: number;
-  type?: number;
   range?: string;
-  colorStyle?: number;
 };
 
 type Chapter = JsonRecord & {
@@ -72,188 +67,53 @@ type Chapter = JsonRecord & {
   wordCount?: number;
   level?: number;
   updateTime?: number;
-  price?: number;
-  paid?: number;
-  isMPChapter?: number;
 };
 
 type Review = JsonRecord & {
   reviewId?: string;
   content?: string;
-  htmlContent?: string;
   abstract?: string;
-  bookId?: string;
   chapterUid?: number;
   chapterName?: string;
   createTime?: number;
   range?: string;
   star?: number;
-  isFinish?: number;
 };
 
-const booksDatabase = worker.database("wereadBooks", {
+const recordsDatabase = worker.database("wereadRecords", {
   type: "managed",
-  initialTitle: "WeRead Books",
-  primaryKeyProperty: "Book ID",
-  schema: {
-    properties: {
-      Title: Schema.title(),
-      "Book ID": Schema.richText(),
-      Author: Schema.richText(),
-      Translator: Schema.richText(),
-      Category: Schema.richText(),
-      Publisher: Schema.richText(),
-      ISBN: Schema.richText(),
-      "Word Count": Schema.number(),
-      Rating: Schema.number(),
-      "Rating Count": Schema.number(),
-      Progress: Schema.number("percent"),
-      Status: Schema.select([
-        { name: "Reading", color: "blue" },
-        { name: "Finished", color: "green" },
-        { name: "Unknown", color: "default" },
-      ]),
-      "Highlight Count": Schema.number(),
-      "Review Count": Schema.number(),
-      "Bookmark Count": Schema.number(),
-      "Read Time Seconds": Schema.number(),
-      "Last Read": Schema.date(),
-      "Open in WeRead": Schema.url(),
-      Cover: Schema.url(),
-      Intro: Schema.richText(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
-const notesDatabase = worker.database("wereadNotes", {
-  type: "managed",
-  initialTitle: "WeRead Highlights and Notes",
+  initialTitle: "WeRead Personal Sync",
   primaryKeyProperty: "Record ID",
   schema: {
     properties: {
-      Text: Schema.title(),
+      Title: Schema.title(),
       "Record ID": Schema.richText(),
       Type: Schema.select([
+        { name: "Sync Status", color: "gray" },
+        { name: "Book", color: "blue" },
+        { name: "Shelf Book", color: "blue" },
+        { name: "Shelf Album", color: "purple" },
+        { name: "Shelf MP", color: "gray" },
+        { name: "Shelf Archive", color: "yellow" },
+        { name: "Reading Stat", color: "green" },
+        { name: "Chapter", color: "default" },
         { name: "Highlight", color: "yellow" },
         { name: "Thought", color: "purple" },
-        { name: "Review", color: "blue" },
+        { name: "Review", color: "orange" },
       ]),
-      Book: Schema.relation("wereadBooks", {
-        twoWay: true,
-        relatedPropertyName: "Notes",
-      }),
+      "Book ID": Schema.richText(),
+      Book: Schema.richText(),
+      Author: Schema.richText(),
       Chapter: Schema.richText(),
       "Chapter UID": Schema.number(),
       Range: Schema.richText(),
       Created: Schema.date(),
-      "Open Original": Schema.url(),
-      Comment: Schema.richText(),
+      Progress: Schema.number("percent"),
+      Count: Schema.number(),
       Rating: Schema.number(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
-const chaptersDatabase = worker.database("wereadChapters", {
-  type: "managed",
-  initialTitle: "WeRead Chapters",
-  primaryKeyProperty: "Chapter Key",
-  schema: {
-    properties: {
-      Title: Schema.title(),
-      "Chapter Key": Schema.richText(),
-      Book: Schema.relation("wereadBooks", {
-        twoWay: true,
-        relatedPropertyName: "Chapters",
-      }),
-      "Chapter UID": Schema.number(),
-      Index: Schema.number(),
-      Level: Schema.number(),
-      "Word Count": Schema.number(),
-      Price: Schema.number(),
-      Paid: Schema.select([
-        { name: "Paid", color: "green" },
-        { name: "Unpaid", color: "red" },
-        { name: "Free", color: "default" },
-      ]),
-      "MP Chapter": Schema.checkbox(),
-      Updated: Schema.date(),
-      "Open Chapter": Schema.url(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
-const shelfDatabase = worker.database("wereadShelf", {
-  type: "managed",
-  initialTitle: "WeRead Shelf",
-  primaryKeyProperty: "Shelf Key",
-  schema: {
-    properties: {
-      Name: Schema.title(),
-      "Shelf Key": Schema.richText(),
-      Type: Schema.select([
-        { name: "Book", color: "blue" },
-        { name: "Album", color: "purple" },
-        { name: "MP", color: "gray" },
-        { name: "Archive", color: "yellow" },
-      ]),
-      Book: Schema.relation("wereadBooks"),
-      Author: Schema.richText(),
-      Category: Schema.richText(),
-      Cover: Schema.url(),
-      Secret: Schema.checkbox(),
-      Top: Schema.checkbox(),
-      Finished: Schema.checkbox(),
-      "Read Updated": Schema.date(),
-      "Track Count": Schema.number(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
-const statsDatabase = worker.database("wereadStats", {
-  type: "managed",
-  initialTitle: "WeRead Reading Stats",
-  primaryKeyProperty: "Stats Key",
-  schema: {
-    properties: {
-      Name: Schema.title(),
-      "Stats Key": Schema.richText(),
-      Mode: Schema.select([
-        { name: "weekly", color: "blue" },
-        { name: "monthly", color: "green" },
-        { name: "annually", color: "yellow" },
-        { name: "overall", color: "purple" },
-      ]),
-      "Base Time": Schema.date(),
-      "Read Days": Schema.number(),
-      "Total Seconds": Schema.number(),
-      "Average Seconds": Schema.number(),
-      "Read Rate": Schema.number(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
-const syncStatusDatabase = worker.database("wereadSyncStatus", {
-  type: "managed",
-  initialTitle: "WeRead Sync Status",
-  primaryKeyProperty: "Status Key",
-  schema: {
-    properties: {
-      Name: Schema.title(),
-      "Status Key": Schema.richText(),
-      Result: Schema.select([
-        { name: "OK", color: "green" },
-        { name: "Errors", color: "red" },
-      ]),
-      "Synced At": Schema.date(),
-      "Notebook Books": Schema.number(),
-      "Shelf Items": Schema.number(),
-      "Stats Modes": Schema.number(),
-      "Error Count": Schema.number(),
+      URL: Schema.url(),
+      Text: Schema.richText(),
+      Comment: Schema.richText(),
       "Raw JSON": Schema.richText(),
     },
   },
@@ -265,7 +125,7 @@ const wereadPacer = worker.pacer("wereadApi", {
 });
 
 worker.sync("wereadOpenApiSync", {
-  database: notesDatabase,
+  database: recordsDatabase,
   mode: "replace",
   schedule: (process.env.SYNC_SCHEDULE ?? "6h") as "6h",
   execute: async (state: SyncState | undefined) => {
@@ -275,8 +135,7 @@ worker.sync("wereadOpenApiSync", {
     let index = state?.index ?? 0;
 
     if (!entries) {
-      const fullRefresh = shouldRunFullRefresh();
-      const notebooks = await fetchRecentNotebooks(fullRefresh ? Number.POSITIVE_INFINITY : NOTEBOOK_SCAN_PAGES).catch((error: unknown) => {
+      const notebooks = await fetchRecentNotebooks(NOTEBOOK_SCAN_PAGES).catch((error: unknown) => {
         errors.push(`notebooks: ${errorMessage(error)}`);
         return [] as NotebookBook[];
       });
@@ -286,19 +145,10 @@ worker.sync("wereadOpenApiSync", {
       });
       const stats = await fetchReadingStats(errors);
 
-      changes.push(...buildShelfChanges(shelf));
-      changes.push(...stats.map(buildStatsChange));
-      entries = collectKnownBookEntries(notebooks, shelf, fullRefresh);
-      changes.push(
-        buildSyncStatusChange({
-          entries,
-          processed: 0,
-          stats,
-          errors,
-          done: entries.length === 0,
-          fullRefresh,
-        }),
-      );
+      changes.push(...buildShelfRecords(shelf));
+      changes.push(...stats.map(buildStatsRecord));
+      entries = collectBookEntries(notebooks);
+      changes.push(buildStatusRecord(entries.length, 0, errors, false));
     }
 
     const batch = entries.slice(index, index + BOOKS_PER_EXECUTION);
@@ -313,333 +163,250 @@ worker.sync("wereadOpenApiSync", {
       ]);
 
       const book = { ...seed, ...bookInfo, bookId };
-      changes.push(buildBookChange(bookId, book, notebook, progress));
+      changes.push(buildBookRecord(bookId, book, notebook, progress));
 
       const chapters = mapChapters(chapterResult.chapters);
-      changes.push(...chapterResult.chapters.map((chapter) => buildChapterChange(bookId, chapter)));
+      changes.push(...chapterResult.chapters.map((chapter) => buildChapterRecord(bookId, book, chapter)));
 
       for (const bookmark of bookmarkResult.bookmarks) {
-        const record = buildBookmarkChange(bookId, book, bookmark, chapters);
+        const record = buildBookmarkRecord(bookId, book, bookmark, chapters);
         if (record) changes.push(record);
       }
 
       for (const review of reviews) {
-        const record = buildReviewChange(bookId, book, review);
+        const record = buildReviewRecord(bookId, book, review);
         if (record) changes.push(record);
       }
     }
 
     index += batch.length;
     const hasMore = index < entries.length;
-    changes.push(
-      buildSyncStatusChange({
-        entries,
-        processed: index,
-        stats: [],
-        errors,
-        done: !hasMore,
-        fullRefresh: state?.fullRefresh ?? false,
-      }),
-    );
+    changes.push(buildStatusRecord(entries.length, index, errors, !hasMore));
 
     return {
       changes: changes as never,
       hasMore,
-      nextState: hasMore ? { entries, index, errors, fullRefresh: state?.fullRefresh ?? false } : undefined,
+      nextState: hasMore ? { entries, index, errors } : undefined,
     };
   },
 });
 
-function buildBookChange(
-  bookId: string,
-  book: WeReadBook,
-  notebook?: NotebookBook,
-  progress?: JsonRecord,
-) {
-  const progressBook = objectAt(progress, "book");
-  const title = safeText(book.title, `WeRead ${bookId}`);
-  return {
-    type: "upsert" as const,
-    targetDatabaseKey: "wereadBooks",
-    key: bookId,
-    properties: {
-      Title: Builder.title(title),
-      "Book ID": Builder.richText(bookId),
-      Author: Builder.richText(safeText(book.author)),
-      Translator: Builder.richText(safeText(book.translator)),
-      Category: Builder.richText(safeText(book.category)),
-      Publisher: Builder.richText(safeText(book.publisher)),
-      ISBN: Builder.richText(safeText(book.isbn)),
-      "Word Count": Builder.number(toNumber(book.wordCount)),
-      Rating: Builder.number(toNumber(book.newRating)),
-      "Rating Count": Builder.number(toNumber(book.newRatingCount)),
-      Progress: Builder.number(normalizeProgress(numberAt(progressBook, "progress") ?? notebook?.readingProgress)),
-      Status: Builder.select(statusFor(notebook?.markedStatus, numberAt(progressBook, "progress"))),
-      "Highlight Count": Builder.number(toNumber(notebook?.noteCount)),
-      "Review Count": Builder.number(toNumber(notebook?.reviewCount)),
-      "Bookmark Count": Builder.number(toNumber(notebook?.bookmarkCount)),
-      "Read Time Seconds": Builder.number(toNumber(numberAt(progressBook, "recordReadingTime"))),
-      "Last Read": buildDate(numberAt(progressBook, "updateTime")),
-      "Open in WeRead": Builder.url(openBookUrl(bookId)),
-      Cover: Builder.url(safeText(book.cover)),
-      Intro: Builder.richText(safeText(book.intro)),
-      "Raw JSON": Builder.richText(rawJson({ book, notebook, progress })),
-    },
-    pageContentMarkdown: [`# ${title}`, "", `[Open in WeRead](${openBookUrl(bookId)})`, "", safeText(book.intro)]
-      .filter(Boolean)
-      .join("\n"),
-  };
+function buildStatusRecord(total: number, processed: number, errors: string[], done: boolean) {
+  return upsert("sync:status", {
+    Title: Builder.title(errors.length ? "Sync Status - Errors" : "Sync Status - OK"),
+    "Record ID": Builder.richText("sync:status"),
+    Type: Builder.select("Sync Status"),
+    "Book ID": Builder.richText(""),
+    Book: Builder.richText(""),
+    Author: Builder.richText(""),
+    Chapter: Builder.richText(""),
+    "Chapter UID": Builder.number(0),
+    Range: Builder.richText(""),
+    Created: Builder.date(new Date().toISOString().slice(0, 10)),
+    Progress: Builder.number(total > 0 ? processed / total : 1),
+    Count: Builder.number(errors.length),
+    Rating: Builder.number(0),
+    URL: Builder.url(""),
+    Text: Builder.richText(`Processed ${processed}/${total}`),
+    Comment: Builder.richText(errors.join("\n")),
+    "Raw JSON": Builder.richText(rawJson({ syncedAt: new Date().toISOString(), total, processed, done, errors })),
+  });
 }
 
-function buildBookmarkChange(
-  bookId: string,
-  book: WeReadBook,
-  bookmark: Bookmark,
-  chapters: Map<number, string>,
-) {
+function buildBookRecord(bookId: string, book: WeReadBook, notebook?: NotebookBook, progress?: JsonRecord) {
+  const progressBook = objectAt(progress, "book");
+  const title = safeText(book.title, `WeRead ${bookId}`);
+  return upsert(`book:${bookId}`, {
+    Title: Builder.title(title),
+    "Record ID": Builder.richText(`book:${bookId}`),
+    Type: Builder.select("Book"),
+    "Book ID": Builder.richText(bookId),
+    Book: Builder.richText(title),
+    Author: Builder.richText(safeText(book.author)),
+    Chapter: Builder.richText(""),
+    "Chapter UID": Builder.number(0),
+    Range: Builder.richText(""),
+    Created: buildDate(numberAt(progressBook, "updateTime")),
+    Progress: Builder.number(normalizeProgress(numberAt(progressBook, "progress") ?? notebook?.readingProgress)),
+    Count: Builder.number(toNumber(notebook?.noteCount) + toNumber(notebook?.reviewCount)),
+    Rating: Builder.number(toNumber(book.newRating)),
+    URL: Builder.url(openBookUrl(bookId)),
+    Text: Builder.richText(safeText(book.intro)),
+    Comment: Builder.richText(`Highlights: ${toNumber(notebook?.noteCount)}, Reviews: ${toNumber(notebook?.reviewCount)}, Bookmarks: ${toNumber(notebook?.bookmarkCount)}`),
+    "Raw JSON": Builder.richText(rawJson({ book, notebook, progress })),
+  });
+}
+
+function buildChapterRecord(bookId: string, book: WeReadBook, chapter: Chapter) {
+  const chapterUid = toNumber(chapter.chapterUid);
+  return upsert(`chapter:${bookId}:${chapterUid}`, {
+    Title: Builder.title(safeText(chapter.title, `Chapter ${chapterUid}`)),
+    "Record ID": Builder.richText(`chapter:${bookId}:${chapterUid}`),
+    Type: Builder.select("Chapter"),
+    "Book ID": Builder.richText(bookId),
+    Book: Builder.richText(safeText(book.title)),
+    Author: Builder.richText(safeText(book.author)),
+    Chapter: Builder.richText(safeText(chapter.title)),
+    "Chapter UID": Builder.number(chapterUid),
+    Range: Builder.richText(""),
+    Created: buildDate(chapter.updateTime),
+    Progress: Builder.number(0),
+    Count: Builder.number(toNumber(chapter.wordCount)),
+    Rating: Builder.number(toNumber(chapter.level)),
+    URL: Builder.url(openChapterUrl(bookId, chapterUid)),
+    Text: Builder.richText(""),
+    Comment: Builder.richText(`Index: ${toNumber(chapter.chapterIdx)}`),
+    "Raw JSON": Builder.richText(rawJson(chapter)),
+  });
+}
+
+function buildBookmarkRecord(bookId: string, book: WeReadBook, bookmark: Bookmark, chapters: Map<number, string>) {
   if (!bookmark.bookmarkId || !bookmark.markText) return undefined;
   const chapterName = getChapterName(chapters, bookmark.chapterUid);
   const originalUrl = openRangeUrl(bookId, bookmark.chapterUid, bookmark.range);
-  return {
-    type: "upsert" as const,
-    key: `highlight:${bookmark.bookmarkId}`,
-    properties: {
-      Text: Builder.title(truncate(bookmark.markText, 180)),
-      "Record ID": Builder.richText(`highlight:${bookmark.bookmarkId}`),
-      Type: Builder.select("Highlight"),
-      Book: [Builder.relation(bookId)],
-      Chapter: Builder.richText(chapterName),
-      "Chapter UID": Builder.number(toNumber(bookmark.chapterUid)),
-      Range: Builder.richText(safeText(bookmark.range)),
-      Created: buildDate(bookmark.createTime),
-      "Open Original": Builder.url(originalUrl),
-      Comment: Builder.richText(""),
-      Rating: Builder.number(0),
-      "Raw JSON": Builder.richText(rawJson(bookmark)),
-    },
-    upstreamUpdatedAt: unixToIso(bookmark.createTime),
-    pageContentMarkdown: buildNotePageContent({ book, text: bookmark.markText, chapterName, originalUrl }),
-  };
+  return upsert(`highlight:${bookmark.bookmarkId}`, {
+    Title: Builder.title(truncate(bookmark.markText, 180)),
+    "Record ID": Builder.richText(`highlight:${bookmark.bookmarkId}`),
+    Type: Builder.select("Highlight"),
+    "Book ID": Builder.richText(bookId),
+    Book: Builder.richText(safeText(book.title)),
+    Author: Builder.richText(safeText(book.author)),
+    Chapter: Builder.richText(chapterName),
+    "Chapter UID": Builder.number(toNumber(bookmark.chapterUid)),
+    Range: Builder.richText(safeText(bookmark.range)),
+    Created: buildDate(bookmark.createTime),
+    Progress: Builder.number(0),
+    Count: Builder.number(0),
+    Rating: Builder.number(0),
+    URL: Builder.url(originalUrl),
+    Text: Builder.richText(bookmark.markText),
+    Comment: Builder.richText(""),
+    "Raw JSON": Builder.richText(rawJson(bookmark)),
+  }, buildNotePageContent({ book, text: bookmark.markText, chapterName, originalUrl }));
 }
 
-function buildReviewChange(bookId: string, book: WeReadBook, review: Review) {
+function buildReviewRecord(bookId: string, book: WeReadBook, review: Review) {
   if (!review.reviewId || !review.content) return undefined;
   const originalUrl = openRangeUrl(bookId, review.chapterUid, review.range);
-  const type = review.range || review.abstract ? "Thought" : "Review";
   const title = review.abstract || review.content;
-  return {
-    type: "upsert" as const,
-    key: `review:${review.reviewId}`,
-    properties: {
-      Text: Builder.title(truncate(title, 180)),
-      "Record ID": Builder.richText(`review:${review.reviewId}`),
-      Type: Builder.select(type),
-      Book: [Builder.relation(bookId)],
-      Chapter: Builder.richText(safeText(review.chapterName)),
-      "Chapter UID": Builder.number(toNumber(review.chapterUid)),
-      Range: Builder.richText(safeText(review.range)),
-      Created: buildDate(review.createTime),
-      "Open Original": Builder.url(originalUrl),
-      Comment: Builder.richText(review.content),
-      Rating: Builder.number(review.star && review.star > 0 ? review.star : 0),
-      "Raw JSON": Builder.richText(rawJson(review)),
-    },
-    upstreamUpdatedAt: unixToIso(review.createTime),
-    pageContentMarkdown: buildNotePageContent({
-      book,
-      text: review.abstract,
-      comment: review.content,
-      chapterName: review.chapterName,
-      originalUrl,
-    }),
-  };
+  return upsert(`review:${review.reviewId}`, {
+    Title: Builder.title(truncate(title, 180)),
+    "Record ID": Builder.richText(`review:${review.reviewId}`),
+    Type: Builder.select(review.range || review.abstract ? "Thought" : "Review"),
+    "Book ID": Builder.richText(bookId),
+    Book: Builder.richText(safeText(book.title)),
+    Author: Builder.richText(safeText(book.author)),
+    Chapter: Builder.richText(safeText(review.chapterName)),
+    "Chapter UID": Builder.number(toNumber(review.chapterUid)),
+    Range: Builder.richText(safeText(review.range)),
+    Created: buildDate(review.createTime),
+    Progress: Builder.number(0),
+    Count: Builder.number(0),
+    Rating: Builder.number(review.star && review.star > 0 ? review.star : 0),
+    URL: Builder.url(originalUrl),
+    Text: Builder.richText(safeText(review.abstract)),
+    Comment: Builder.richText(review.content),
+    "Raw JSON": Builder.richText(rawJson(review)),
+  }, buildNotePageContent({ book, text: review.abstract, comment: review.content, chapterName: review.chapterName, originalUrl }));
 }
 
-function buildChapterChange(bookId: string, chapter: Chapter) {
-  const chapterUid = toNumber(chapter.chapterUid);
-  const key = `${bookId}:${chapterUid}`;
-  return {
-    type: "upsert" as const,
-    targetDatabaseKey: "wereadChapters",
-    key,
-    properties: {
-      Title: Builder.title(safeText(chapter.title, `Chapter ${chapterUid}`)),
-      "Chapter Key": Builder.richText(key),
-      Book: [Builder.relation(bookId)],
-      "Chapter UID": Builder.number(chapterUid),
-      Index: Builder.number(toNumber(chapter.chapterIdx)),
-      Level: Builder.number(toNumber(chapter.level)),
-      "Word Count": Builder.number(toNumber(chapter.wordCount)),
-      Price: Builder.number(toNumber(chapter.price)),
-      Paid: Builder.select(chapter.price ? (chapter.paid === 1 ? "Paid" : "Unpaid") : "Free"),
-      "MP Chapter": Builder.checkbox(chapter.isMPChapter === 1),
-      Updated: buildDate(chapter.updateTime),
-      "Open Chapter": Builder.url(openChapterUrl(bookId, chapterUid)),
-      "Raw JSON": Builder.richText(rawJson(chapter)),
-    },
-  };
-}
-
-function buildShelfChanges(shelf: JsonRecord) {
-  const changes: JsonRecord[] = [];
+function buildShelfRecords(shelf: JsonRecord) {
+  const records: JsonRecord[] = [];
   for (const item of arrayAt(shelf, "books")) {
     const bookId = safeText(item.bookId);
-    changes.push({
-      type: "upsert",
-      targetDatabaseKey: "wereadShelf",
-      key: `book:${bookId}`,
-      properties: {
-        Name: Builder.title(safeText(item.title, bookId)),
-        "Shelf Key": Builder.richText(`book:${bookId}`),
-        Type: Builder.select("Book"),
-        Book: bookId ? [Builder.relation(bookId)] : [],
-        Author: Builder.richText(safeText(item.author)),
-        Category: Builder.richText(safeText(item.category)),
-        Cover: Builder.url(safeText(item.cover)),
-        Secret: Builder.checkbox(item.secret === 1),
-        Top: Builder.checkbox(item.isTop === 1),
-        Finished: Builder.checkbox(item.finishReading === 1),
-        "Read Updated": buildDate(numberAt(item, "readUpdateTime")),
-        "Track Count": Builder.number(0),
-        "Raw JSON": Builder.richText(rawJson(item)),
-      },
-    });
+    records.push(upsert(`shelf-book:${bookId}`, baseShelfProperties({
+      id: `shelf-book:${bookId}`,
+      type: "Shelf Book",
+      title: safeText(item.title, bookId),
+      bookId,
+      author: safeText(item.author),
+      url: bookId ? openBookUrl(bookId) : "",
+      raw: item,
+    })));
   }
-
   for (const item of arrayAt(shelf, "albums")) {
     const album = objectAt(item, "albumInfo");
-    const extra = objectAt(item, "albumInfoExtra");
     const albumId = safeText(album.albumId);
-    changes.push({
-      type: "upsert",
-      targetDatabaseKey: "wereadShelf",
-      key: `album:${albumId}`,
-      properties: {
-        Name: Builder.title(safeText(album.name, albumId)),
-        "Shelf Key": Builder.richText(`album:${albumId}`),
-        Type: Builder.select("Album"),
-        Book: [],
-        Author: Builder.richText(safeText(album.authorName)),
-        Category: Builder.richText(""),
-        Cover: Builder.url(safeText(album.cover)),
-        Secret: Builder.checkbox(extra.secret === 1),
-        Top: Builder.checkbox(extra.isTop === 1),
-        Finished: Builder.checkbox(album.finish === 1),
-        "Read Updated": buildDate(numberAt(extra, "lectureReadUpdateTime")),
-        "Track Count": Builder.number(toNumber(numberAt(album, "trackCount"))),
-        "Raw JSON": Builder.richText(rawJson(item)),
-      },
-    });
+    records.push(upsert(`shelf-album:${albumId}`, baseShelfProperties({
+      id: `shelf-album:${albumId}`,
+      type: "Shelf Album",
+      title: safeText(album.name, albumId),
+      bookId: albumId,
+      author: safeText(album.authorName),
+      url: "",
+      raw: item,
+    })));
   }
-
   if (shelf.mp && typeof shelf.mp === "object") {
-    changes.push({
-      type: "upsert",
-      targetDatabaseKey: "wereadShelf",
-      key: "mp:collections",
-      properties: {
-        Name: Builder.title("文章收藏"),
-        "Shelf Key": Builder.richText("mp:collections"),
-        Type: Builder.select("MP"),
-        Book: [],
-        Author: Builder.richText(""),
-        Category: Builder.richText(""),
-        Cover: Builder.url(""),
-        Secret: Builder.checkbox(true),
-        Top: Builder.checkbox(false),
-        Finished: Builder.checkbox(false),
-        "Read Updated": Builder.richText(""),
-        "Track Count": Builder.number(0),
-        "Raw JSON": Builder.richText(rawJson(shelf.mp)),
-      },
-    });
+    records.push(upsert("shelf-mp:collections", baseShelfProperties({
+      id: "shelf-mp:collections",
+      type: "Shelf MP",
+      title: "文章收藏",
+      bookId: "",
+      author: "",
+      url: "",
+      raw: shelf.mp,
+    })));
   }
-
   for (const archive of arrayAt(shelf, "archive")) {
     const name = safeText(archive.name, "Archive");
-    changes.push({
-      type: "upsert",
-      targetDatabaseKey: "wereadShelf",
-      key: `archive:${name}`,
-      properties: {
-        Name: Builder.title(name),
-        "Shelf Key": Builder.richText(`archive:${name}`),
-        Type: Builder.select("Archive"),
-        Book: [],
-        Author: Builder.richText(""),
-        Category: Builder.richText(""),
-        Cover: Builder.url(""),
-        Secret: Builder.checkbox(false),
-        Top: Builder.checkbox(false),
-        Finished: Builder.checkbox(false),
-        "Read Updated": Builder.richText(""),
-        "Track Count": Builder.number(0),
-        "Raw JSON": Builder.richText(rawJson(archive)),
-      },
-    });
+    records.push(upsert(`shelf-archive:${name}`, baseShelfProperties({
+      id: `shelf-archive:${name}`,
+      type: "Shelf Archive",
+      title: name,
+      bookId: "",
+      author: "",
+      url: "",
+      raw: archive,
+    })));
   }
-
-  return changes;
+  return records;
 }
 
-function buildStatsChange(item: JsonRecord) {
+function baseShelfProperties(input: { id: string; type: string; title: string; bookId: string; author: string; url: string; raw: unknown }) {
+  return {
+    Title: Builder.title(input.title),
+    "Record ID": Builder.richText(input.id),
+    Type: Builder.select(input.type),
+    "Book ID": Builder.richText(input.bookId),
+    Book: Builder.richText(input.title),
+    Author: Builder.richText(input.author),
+    Chapter: Builder.richText(""),
+    "Chapter UID": Builder.number(0),
+    Range: Builder.richText(""),
+    Created: Builder.richText(""),
+    Progress: Builder.number(0),
+    Count: Builder.number(0),
+    Rating: Builder.number(0),
+    URL: Builder.url(input.url),
+    Text: Builder.richText(""),
+    Comment: Builder.richText(""),
+    "Raw JSON": Builder.richText(rawJson(input.raw)),
+  };
+}
+
+function buildStatsRecord(item: JsonRecord) {
   const mode = safeText(item.mode, "monthly");
-  const baseTime = numberAt(item, "baseTime");
-  const key = `${mode}:${baseTime ?? 0}`;
-  return {
-    type: "upsert" as const,
-    targetDatabaseKey: "wereadStats",
-    key,
-    properties: {
-      Name: Builder.title(`${mode} reading stats`),
-      "Stats Key": Builder.richText(key),
-      Mode: Builder.select(mode),
-      "Base Time": buildDate(baseTime),
-      "Read Days": Builder.number(toNumber(numberAt(item, "readDays"))),
-      "Total Seconds": Builder.number(toNumber(numberAt(item, "totalReadTime"))),
-      "Average Seconds": Builder.number(toNumber(numberAt(item, "dayAverageReadTime"))),
-      "Read Rate": Builder.number(toNumber(numberAt(item, "readRate"))),
-      "Raw JSON": Builder.richText(rawJson(item)),
-    },
-  };
-}
-
-function buildSyncStatusChange(input: {
-  entries: BookEntry[];
-  processed: number;
-  stats: JsonRecord[];
-  errors: string[];
-  done: boolean;
-  fullRefresh: boolean;
-}) {
-  const summary = {
-    syncedAt: new Date().toISOString(),
-    totalBooks: input.entries.length,
-    processedBooks: input.processed,
-    done: input.done,
-    fullRefresh: input.fullRefresh,
-    notebookScanPages: NOTEBOOK_SCAN_PAGES,
-    booksPerExecution: BOOKS_PER_EXECUTION,
-    statsModes: input.stats.map((item) => item.mode),
-    errors: input.errors,
-  };
-
-  return {
-    type: "upsert" as const,
-    targetDatabaseKey: "wereadSyncStatus",
-    key: "sync-status:latest",
-    properties: {
-      Name: Builder.title(input.errors.length ? "Sync Status - Errors" : "Sync Status - OK"),
-      "Status Key": Builder.richText("sync-status:latest"),
-      Result: Builder.select(input.errors.length ? "Errors" : "OK"),
-      "Synced At": Builder.date(new Date().toISOString().slice(0, 10)),
-      "Notebook Books": Builder.number(input.entries.length),
-      "Shelf Items": Builder.number(input.processed),
-      "Stats Modes": Builder.number(input.stats.length),
-      "Error Count": Builder.number(input.errors.length),
-      "Raw JSON": Builder.richText(rawJson(summary)),
-    },
-  };
+  const key = `stat:${mode}:${numberAt(item, "baseTime") ?? 0}`;
+  return upsert(key, {
+    Title: Builder.title(`${mode} reading stats`),
+    "Record ID": Builder.richText(key),
+    Type: Builder.select("Reading Stat"),
+    "Book ID": Builder.richText(""),
+    Book: Builder.richText(""),
+    Author: Builder.richText(""),
+    Chapter: Builder.richText(""),
+    "Chapter UID": Builder.number(0),
+    Range: Builder.richText(""),
+    Created: buildDate(numberAt(item, "baseTime")),
+    Progress: Builder.number(0),
+    Count: Builder.number(toNumber(numberAt(item, "readDays"))),
+    Rating: Builder.number(0),
+    URL: Builder.url(""),
+    Text: Builder.richText(`Total seconds: ${toNumber(numberAt(item, "totalReadTime"))}`),
+    Comment: Builder.richText(`Average seconds: ${toNumber(numberAt(item, "dayAverageReadTime"))}`),
+    "Raw JSON": Builder.richText(rawJson(item)),
+  });
 }
 
 async function fetchRecentNotebooks(maxPages: number): Promise<NotebookBook[]> {
@@ -712,10 +479,7 @@ async function fetchReadingStats(errors: string[]): Promise<JsonRecord[]> {
   );
   return results.flatMap((result, index) => {
     const mode = modes[index];
-    if (result.status === "fulfilled") {
-      return [{ ...result.value, mode }];
-    }
-
+    if (result.status === "fulfilled") return [{ ...result.value, mode }];
     errors.push(`stats:${mode}: ${errorMessage(result.reason)}`);
     return [];
   });
@@ -739,33 +503,21 @@ async function wereadRequest<T>(body: JsonRecord): Promise<T> {
   return json as T;
 }
 
-function collectKnownBookEntries(
-  notebooks: NotebookBook[],
-  shelf: JsonRecord,
-  fullRefresh: boolean,
-): BookEntry[] {
+function collectBookEntries(notebooks: NotebookBook[]): BookEntry[] {
   const result = new Map<string, BookEntry>();
   for (const notebook of notebooks) {
     const book = notebook.book ?? {};
     const bookId = notebook.bookId ?? book.bookId;
     if (bookId) result.set(bookId, { bookId, seed: { ...book, bookId }, notebook });
   }
-  if (fullRefresh) {
-    for (const item of arrayAt(shelf, "books")) {
-      const bookId = safeText(item.bookId);
-      if (bookId && !result.has(bookId)) result.set(bookId, { bookId, seed: item as WeReadBook });
-    }
-  }
   return [...result.values()];
 }
 
-function buildNotePageContent(input: {
-  book: WeReadBook;
-  text?: string;
-  comment?: string;
-  chapterName?: string;
-  originalUrl: string;
-}) {
+function upsert(key: string, properties: JsonRecord, pageContentMarkdown?: string) {
+  return { type: "upsert" as const, key, properties, pageContentMarkdown };
+}
+
+function buildNotePageContent(input: { book: WeReadBook; text?: string; comment?: string; chapterName?: string; originalUrl: string }) {
   return [
     `Book: ${safeText(input.book.title)}`,
     input.book.author ? `Author: ${input.book.author}` : "",
@@ -774,9 +526,7 @@ function buildNotePageContent(input: {
     input.text ? `> ${input.text.replaceAll("\n", "\n> ")}` : "",
     input.comment ? `\nComment:\n${input.comment}` : "",
     input.originalUrl ? `\n[Open original](${input.originalUrl})` : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
+  ].filter(Boolean).join("\n");
 }
 
 function mapChapters(chapters: Chapter[] | undefined) {
@@ -828,17 +578,6 @@ function unixToIso(unixSeconds?: number) {
 function normalizeProgress(progress?: number) {
   if (typeof progress !== "number" || Number.isNaN(progress)) return 0;
   return Math.max(0, Math.min(100, progress)) / 100;
-}
-
-function statusFor(markedStatus?: number, progress?: number) {
-  if (markedStatus === 1 || progress === 100) return "Finished";
-  if (markedStatus === 0 || (progress !== undefined && progress > 0)) return "Reading";
-  return "Unknown";
-}
-
-function shouldRunFullRefresh() {
-  const value = process.env.FULL_REFRESH;
-  return value === "1" || value === "true" || value === "yes";
 }
 
 function numberEnv(name: string, fallback: number) {

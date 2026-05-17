@@ -1,149 +1,95 @@
 # 微信读书 Notion Worker
 
-这个项目用于把微信读书 Skill API 中属于你个人账号的数据同步到 Notion Worker 托管数据库。
+这个项目把微信读书 Skill API 中属于你个人账号的数据同步到一个 Notion Worker 托管数据库。
 
-## 会创建什么
+## 当前设计
 
-- `WeRead Books`：书籍主表，包含书名、作者、阅读进度、笔记统计、评分、封面和微信读书跳转链接。
-- `WeRead Highlights and Notes`：划线、想法、个人评论，并通过关系字段关联到对应书籍。
-- `WeRead Chapters`：章节目录，包含章节 UID、层级、字数、付费状态和章节跳转链接。
-- `WeRead Shelf`：书架条目，包含电子书、专辑/有声书、文章收藏入口和书单归档。
-- `WeRead Reading Stats`：本周、本月、本年、总计四类阅读统计。
-- `WeRead Sync Status`：最近一次同步状态，用于排查是否成功以及哪个接口失败。
+为避免 Notion Worker 跨数据库同步不稳定，当前版本只创建一张数据库：
 
-多数数据库都包含 `Raw JSON` 字段，用来保存 API 返回的原始数据片段，避免字段遗漏。每条笔记都会保存一个 `weread://` 深度链接。具备 `chapterUid` 和 `range` 的划线或想法，可以从 Notion 跳回微信读书 App 的原文位置；无法定位到具体位置的整本书评论，会回退为打开对应书籍。
+- `WeRead Personal Sync`
 
-## 使用前提
+所有记录通过 `Type` 字段区分：
 
-- 你已经有 Notion Worker 同步服务的部署流程。
-- 你已经有微信读书 API Key，格式类似 `wrk-...`。
-- 运行环境需要 Node.js 22 或更高版本。
+- `Sync Status`：同步状态和错误信息
+- `Book`：个人有笔记的书籍详情和阅读进度
+- `Shelf Book`：书架中的电子书
+- `Shelf Album`：书架中的专辑/有声书
+- `Shelf MP`：文章收藏入口
+- `Shelf Archive`：书架归档/书单
+- `Reading Stat`：本周、本月、本年、总计阅读统计
+- `Chapter`：章节目录
+- `Highlight`：个人划线
+- `Thought`：个人划线想法
+- `Review`：个人整本书评论
 
-## 安装
+核心记录会保存 `Raw JSON` 字段，尽量保留微信读书 API 返回的原始信息。
 
-安装项目依赖：
+## 不会同步的内容
 
-```bash
-npm install
-```
+- 其他用户的公开点评
+- 热门划线
+- 热门划线下的公开想法
+- 为你推荐、相似推荐、搜索结果
+- 普通书签内容。微信读书当前接口只提供书签数量，不导出书签正文。
 
 ## 配置
 
-把微信读书 API Key 配置为 Notion Worker 的环境变量：
+必须配置微信读书 API Key：
 
 ```bash
-notion workers env set WEREAD_API_KEY
+ntn workers env set WEREAD_API_KEY=你的微信读书APIKey
 ```
 
-可选：配置同步频率：
+可选：同步频率，默认 `6h`：
 
 ```bash
-notion workers env set SYNC_SCHEDULE
+ntn workers env set SYNC_SCHEDULE=6h
 ```
 
-常用示例：
-
-```text
-30m
-6h
-1d
-```
-
-如果不配置 `SYNC_SCHEDULE`，默认每 6 小时同步一次。
-
-可选：配置每次执行处理的书籍数量。默认每次处理 3 本，用来避免 Notion Worker 超时；如果你的书很多或日志仍提示超时，可以设为 1 或 2：
+可选：每次执行处理几本书，默认 `2`。如果 Worker 超时，设为 `1`：
 
 ```bash
-ntn workers env set BOOKS_PER_EXECUTION=2
+ntn workers env set BOOKS_PER_EXECUTION=1
 ```
 
-默认同步只处理最近有笔记变动的书，不会每次扫描整个书架。可选配置最近笔记页数，默认 2 页，每页最多 100 本有笔记的书：
+可选：每次扫描最近几页有笔记的书，默认 `1`，每页最多 100 本：
 
 ```bash
-ntn workers env set NOTEBOOK_SCAN_PAGES=2
-```
-
-如果第一次部署想补齐整个书架所有书，可以临时开启全量刷新；全量完成后建议关闭：
-
-```bash
-ntn workers env set FULL_REFRESH=1
-ntn workers deploy
-ntn workers sync state reset wereadOpenApiSync
-```
-
-全量跑完后关闭：
-
-```bash
-ntn workers env set FULL_REFRESH=0
-ntn workers deploy
+ntn workers env set NOTEBOOK_SCAN_PAGES=1
 ```
 
 ## 部署
 
-使用你现有的 Notion Worker 部署流程部署即可。部署后，Worker 会创建并维护两张托管数据库：
-
-- `WeRead Books`
-- `WeRead Highlights and Notes`
-
-## 本地检查
-
-运行类型检查：
-
 ```bash
+git pull
+npm install
 npm run typecheck
-```
-
-## 同步范围
-
-当前同步内容包括：
-
-- 书架：电子书、专辑/有声书、文章收藏入口、归档书单
-- 书籍：详情、进度、评分、统计字段
-- 章节：目录、层级、字数、付费状态
-- 笔记：划线原文、个人想法、整本书评论
-- 阅读统计：本周、本月、本年、总计
-- 原始数据：核心记录保留 `Raw JSON`
-- 跳转链接：跳回微信读书原文、章节或书籍的深度链接
-
-不会同步的内容：
-
-- 公开点评，包括其他用户对书籍的评论
-- 热门划线、热门划线下的公开想法
-- 为你推荐、相似推荐、搜索结果
-- 任何不能通过当前 API Key 识别为你个人账号的数据
-
-## 注意事项
-
-- Notion Worker sync 当前会创建和管理自己的数据库，不能直接把同步数据写入你已有的 Notion 数据库。
-- 微信读书当前接口不能导出普通书签内容，只能读取书签数量；可导出的内容是划线、想法和评论。
-- 项目只调用个人数据相关接口，不调用 `/review/list`、`/book/recommend`、`/book/bestbookmarks`、`/book/readreviews` 等公开或推荐类接口。
-- 默认只同步最近有笔记变动的书籍；书架本身会更新，但不会每次对书架里的每一本书都查询详情、章节、划线和点评。
-- 不要把 `WEREAD_API_KEY` 写入代码或提交到 GitHub。项目里的 `.env.example` 只是占位示例。
-
-## 排查同步为空
-
-如果部署后只创建数据库、没有任何记录：
-
-1. 查看 `WeRead Sync Status` 里是否有 `Sync Status - OK/Errors`。
-2. 如果没有这条记录，说明 Worker 运行阶段可能还没触发，先查看运行日志。
-3. 如果有 `Sync Status - Errors`，打开 `Raw JSON` 查看哪个接口失败。
-4. 重新部署后建议重置 sync 状态：
-
-```bash
-ntn workers sync state reset wereadOpenApiSync
-```
-
-如果 Worker 状态显示 `Sync handler timed out`，降低每批处理数量后重新部署：
-
-```bash
-ntn workers env set BOOKS_PER_EXECUTION=1
+npm run build
 ntn workers deploy
 ntn workers sync state reset wereadOpenApiSync
 ```
 
-5. 查看最近运行：
+如果你是删除旧 Worker 后重新部署：
+
+```bash
+git clone https://github.com/uuavv/weread-notion-worker.git
+cd weread-notion-worker
+npm install
+npm run build
+ntn workers deploy --name weread-notion-worker
+ntn workers env set WEREAD_API_KEY=你的微信读书APIKey
+ntn workers env set BOOKS_PER_EXECUTION=1
+ntn workers env set NOTEBOOK_SCAN_PAGES=1
+ntn workers deploy
+```
+
+## 排查
+
+查看 Worker 运行：
 
 ```bash
 ntn workers runs list
 ntn workers runs logs <run-id>
 ```
+
+如果数据库有 `Sync Status - Errors`，打开这条记录的 `Raw JSON` 或 `Comment` 字段查看失败接口。
