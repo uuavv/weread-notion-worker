@@ -51,6 +51,12 @@ notion workers env set SYNC_SCHEDULE
 
 如果不配置 `SYNC_SCHEDULE`，默认每 6 小时同步一次。
 
+可选：配置每次执行处理的书籍数量。默认每次处理 3 本，用来避免 Notion Worker 超时；如果你的书很多或日志仍提示超时，可以设为 1 或 2：
+
+```bash
+ntn workers env set BOOKS_PER_EXECUTION=2
+```
+
 ## 部署
 
 使用你现有的 Notion Worker 部署流程部署即可。部署后，Worker 会创建并维护两张托管数据库：
@@ -102,6 +108,14 @@ npm run typecheck
 4. 重新部署后建议重置 sync 状态：
 
 ```bash
+ntn workers sync state reset wereadOpenApiSync
+```
+
+如果 Worker 状态显示 `Sync handler timed out`，降低每批处理数量后重新部署：
+
+```bash
+ntn workers env set BOOKS_PER_EXECUTION=1
+ntn workers deploy
 ntn workers sync state reset wereadOpenApiSync
 ```
 

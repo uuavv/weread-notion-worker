@@ -9,8 +9,21 @@ const WEREAD_API_URL = "https://i.weread.qq.com/api/agent/gateway";
 const SKILL_VERSION = "1.0.3";
 const PAGE_SIZE = 100;
 const ERROR_TEXT_LIMIT = 500;
+const BOOKS_PER_EXECUTION = numberEnv("BOOKS_PER_EXECUTION", 3);
 
 type JsonRecord = Record<string, unknown>;
+
+type SyncState = {
+  entries: BookEntry[];
+  index: number;
+  errors: string[];
+};
+
+type BookEntry = {
+  bookId: string;
+  seed: WeReadBook;
+  notebook?: NotebookBook;
+};
 
 type NotebookBook = JsonRecord & {
   bookId?: string;
@@ -253,26 +266,40 @@ worker.sync("wereadOpenApiSync", {
   database: notesDatabase,
   mode: "replace",
   schedule: (process.env.SYNC_SCHEDULE ?? "6h") as "6h",
-  execute: async () => {
+  execute: async (state: SyncState | undefined) => {
     const changes: JsonRecord[] = [];
-    const errors: string[] = [];
-    const notebooks = await fetchAllNotebooks().catch((error: unknown) => {
-      errors.push(`notebooks: ${errorMessage(error)}`);
-      return [] as NotebookBook[];
-    });
-    const shelf = await fetchShelf().catch((error: unknown) => {
-      errors.push(`shelf: ${errorMessage(error)}`);
-      return {} as JsonRecord;
-    });
-    const stats = await fetchReadingStats(errors);
+    const errors = [...(state?.errors ?? [])];
+    let entries = state?.entries;
+    let index = state?.index ?? 0;
 
-    changes.push(...buildShelfChanges(shelf));
-    changes.push(...stats.map(buildStatsChange));
-    changes.push(buildSyncStatusChange({ notebooks, shelf, stats, errors }));
+    if (!entries) {
+      const notebooks = await fetchAllNotebooks().catch((error: unknown) => {
+        errors.push(`notebooks: ${errorMessage(error)}`);
+        return [] as NotebookBook[];
+      });
+      const shelf = await fetchShelf().catch((error: unknown) => {
+        errors.push(`shelf: ${errorMessage(error)}`);
+        return {} as JsonRecord;
+      });
+      const stats = await fetchReadingStats(errors);
 
-    const knownBooks = collectKnownBooks(notebooks, shelf);
+      changes.push(...buildShelfChanges(shelf));
+      changes.push(...stats.map(buildStatsChange));
+      entries = collectKnownBookEntries(notebooks, shelf);
+      changes.push(
+        buildSyncStatusChange({
+          entries,
+          processed: 0,
+          stats,
+          errors,
+          done: entries.length === 0,
+        }),
+      );
+    }
 
-    for (const [bookId, seed] of knownBooks) {
+    const batch = entries.slice(index, index + BOOKS_PER_EXECUTION);
+    for (const entry of batch) {
+      const { bookId, seed, notebook } = entry;
       const [bookInfo, progress, chapterResult, bookmarkResult, reviews] = await Promise.all([
         fetchBookInfo(bookId),
         fetchProgress(bookId),
@@ -282,7 +309,6 @@ worker.sync("wereadOpenApiSync", {
       ]);
 
       const book = { ...seed, ...bookInfo, bookId };
-      const notebook = notebooks.find((item) => (item.bookId ?? item.book?.bookId) === bookId);
       changes.push(buildBookChange(bookId, book, notebook, progress));
 
       const chapters = mapChapters(chapterResult.chapters);
@@ -299,7 +325,23 @@ worker.sync("wereadOpenApiSync", {
       }
     }
 
-    return { changes: changes as never, hasMore: false };
+    index += batch.length;
+    const hasMore = index < entries.length;
+    changes.push(
+      buildSyncStatusChange({
+        entries,
+        processed: index,
+        stats: [],
+        errors,
+        done: !hasMore,
+      }),
+    );
+
+    return {
+      changes: changes as never,
+      hasMore,
+      nextState: hasMore ? { entries, index, errors } : undefined,
+    };
   },
 });
 
@@ -541,7 +583,7 @@ function buildStatsChange(item: JsonRecord) {
   const key = `${mode}:${baseTime ?? 0}`;
   return {
     type: "upsert" as const,
-    targetDatabaseKey: "wereadSyncStatus",
+    targetDatabaseKey: "wereadStats",
     key,
     properties: {
       Name: Builder.title(`${mode} reading stats`),
@@ -558,35 +600,32 @@ function buildStatsChange(item: JsonRecord) {
 }
 
 function buildSyncStatusChange(input: {
-  notebooks: NotebookBook[];
-  shelf: JsonRecord;
+  entries: BookEntry[];
+  processed: number;
   stats: JsonRecord[];
   errors: string[];
+  done: boolean;
 }) {
-  const books = arrayAt(input.shelf, "books");
-  const albums = arrayAt(input.shelf, "albums");
-  const mpCount = input.shelf.mp && typeof input.shelf.mp === "object" ? 1 : 0;
   const summary = {
     syncedAt: new Date().toISOString(),
-    notebookBooks: input.notebooks.length,
-    shelfBooks: books.length,
-    shelfAlbums: albums.length,
-    shelfMpEntries: mpCount,
+    totalBooks: input.entries.length,
+    processedBooks: input.processed,
+    done: input.done,
     statsModes: input.stats.map((item) => item.mode),
     errors: input.errors,
   };
 
   return {
     type: "upsert" as const,
-    targetDatabaseKey: "wereadStats",
+    targetDatabaseKey: "wereadSyncStatus",
     key: "sync-status:latest",
     properties: {
       Name: Builder.title(input.errors.length ? "Sync Status - Errors" : "Sync Status - OK"),
       "Status Key": Builder.richText("sync-status:latest"),
       Result: Builder.select(input.errors.length ? "Errors" : "OK"),
       "Synced At": Builder.date(new Date().toISOString().slice(0, 10)),
-      "Notebook Books": Builder.number(input.notebooks.length),
-      "Shelf Items": Builder.number(books.length + albums.length + mpCount),
+      "Notebook Books": Builder.number(input.entries.length),
+      "Shelf Items": Builder.number(input.processed),
       "Stats Modes": Builder.number(input.stats.length),
       "Error Count": Builder.number(input.errors.length),
       "Raw JSON": Builder.richText(rawJson(summary)),
@@ -689,21 +728,21 @@ async function wereadRequest<T>(body: JsonRecord): Promise<T> {
   return json as T;
 }
 
-function collectKnownBooks(
+function collectKnownBookEntries(
   notebooks: NotebookBook[],
   shelf: JsonRecord,
-): Map<string, WeReadBook> {
-  const result = new Map<string, WeReadBook>();
+): BookEntry[] {
+  const result = new Map<string, BookEntry>();
   for (const notebook of notebooks) {
     const book = notebook.book ?? {};
     const bookId = notebook.bookId ?? book.bookId;
-    if (bookId) result.set(bookId, { ...book, bookId });
+    if (bookId) result.set(bookId, { bookId, seed: { ...book, bookId }, notebook });
   }
   for (const item of arrayAt(shelf, "books")) {
     const bookId = safeText(item.bookId);
-    if (bookId && !result.has(bookId)) result.set(bookId, item as WeReadBook);
+    if (bookId && !result.has(bookId)) result.set(bookId, { bookId, seed: item as WeReadBook });
   }
-  return result;
+  return [...result.values()];
 }
 
 function buildNotePageContent(input: {
@@ -781,6 +820,11 @@ function statusFor(markedStatus?: number, progress?: number) {
   if (markedStatus === 1 || progress === 100) return "Finished";
   if (markedStatus === 0 || (progress !== undefined && progress > 0)) return "Reading";
   return "Unknown";
+}
+
+function numberEnv(name: string, fallback: number) {
+  const value = Number(process.env[name]);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function toNumber(value?: number) {
