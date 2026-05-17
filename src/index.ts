@@ -8,9 +8,6 @@ export default worker;
 const WEREAD_API_URL = "https://i.weread.qq.com/api/agent/gateway";
 const SKILL_VERSION = "1.0.3";
 const PAGE_SIZE = 100;
-const REVIEW_PAGE_SIZE = 50;
-const MAX_PUBLIC_REVIEWS_PER_BOOK = numberEnv("MAX_PUBLIC_REVIEWS_PER_BOOK", 20);
-const MAX_RECOMMENDATIONS = numberEnv("MAX_RECOMMENDATIONS", 24);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -125,7 +122,6 @@ const notesDatabase = worker.database("wereadNotes", {
         { name: "Highlight", color: "yellow" },
         { name: "Thought", color: "purple" },
         { name: "Review", color: "blue" },
-        { name: "Popular Highlight", color: "orange" },
       ]),
       Book: Schema.relation("wereadBooks", {
         twoWay: true,
@@ -225,48 +221,6 @@ const statsDatabase = worker.database("wereadStats", {
   },
 });
 
-const recommendationsDatabase = worker.database("wereadRecommendations", {
-  type: "managed",
-  initialTitle: "WeRead Recommendations",
-  primaryKeyProperty: "Recommendation Key",
-  schema: {
-    properties: {
-      Title: Schema.title(),
-      "Recommendation Key": Schema.richText(),
-      Source: Schema.select([
-        { name: "Personalized", color: "green" },
-        { name: "Similar", color: "blue" },
-      ]),
-      Book: Schema.relation("wereadBooks"),
-      Author: Schema.richText(),
-      Reason: Schema.richText(),
-      Rating: Schema.number(),
-      "Reading Count": Schema.number(),
-      Cover: Schema.url(),
-      "Open in WeRead": Schema.url(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
-const publicReviewsDatabase = worker.database("wereadPublicReviews", {
-  type: "managed",
-  initialTitle: "WeRead Public Reviews",
-  primaryKeyProperty: "Review Key",
-  schema: {
-    properties: {
-      Text: Schema.title(),
-      "Review Key": Schema.richText(),
-      Book: Schema.relation("wereadBooks"),
-      Author: Schema.richText(),
-      Rating: Schema.number(),
-      Created: Schema.date(),
-      "Finished Book": Schema.checkbox(),
-      "Raw JSON": Schema.richText(),
-    },
-  },
-});
-
 const wereadPacer = worker.pacer("wereadApi", {
   allowedRequests: 60,
   intervalMs: 60_000,
@@ -278,29 +232,25 @@ worker.sync("wereadOpenApiSync", {
   schedule: (process.env.SYNC_SCHEDULE ?? "6h") as "6h",
   execute: async () => {
     const changes: JsonRecord[] = [];
-    const [notebooks, shelf, stats, recommendations] = await Promise.all([
+    const [notebooks, shelf, stats] = await Promise.all([
       fetchAllNotebooks(),
       fetchShelf(),
       fetchReadingStats(),
-      fetchRecommendations(),
     ]);
 
     changes.push(...buildShelfChanges(shelf));
     changes.push(...stats.map(buildStatsChange));
-    changes.push(...recommendations.map(buildRecommendationChange));
 
-    const knownBooks = collectKnownBooks(notebooks, shelf, recommendations);
+    const knownBooks = collectKnownBooks(notebooks, shelf);
 
     for (const [bookId, seed] of knownBooks) {
-      const [bookInfo, progress, chapterResult, bookmarkResult, reviews, publicReviews] =
-        await Promise.all([
-          fetchBookInfo(bookId),
-          fetchProgress(bookId),
-          fetchChapters(bookId),
-          fetchBookmarks(bookId),
-          fetchAllReviews(bookId),
-          fetchPublicReviews(bookId),
-        ]);
+      const [bookInfo, progress, chapterResult, bookmarkResult, reviews] = await Promise.all([
+        fetchBookInfo(bookId),
+        fetchProgress(bookId),
+        fetchChapters(bookId),
+        fetchBookmarks(bookId),
+        fetchAllReviews(bookId),
+      ]);
 
       const book = { ...seed, ...bookInfo, bookId };
       const notebook = notebooks.find((item) => (item.bookId ?? item.book?.bookId) === bookId);
@@ -316,11 +266,6 @@ worker.sync("wereadOpenApiSync", {
 
       for (const review of reviews) {
         const record = buildReviewChange(bookId, book, review);
-        if (record) changes.push(record);
-      }
-
-      for (const review of publicReviews) {
-        const record = buildPublicReviewChange(bookId, review);
         if (record) changes.push(record);
       }
     }
@@ -583,52 +528,6 @@ function buildStatsChange(item: JsonRecord) {
   };
 }
 
-function buildRecommendationChange(item: JsonRecord) {
-  const book = (objectAt(item, "bookInfo").bookId ? objectAt(item, "bookInfo") : item) as WeReadBook;
-  const bookId = safeText(book.bookId);
-  const key = `personalized:${bookId || safeText(item.searchIdx)}`;
-  return {
-    type: "upsert" as const,
-    targetDatabaseKey: "wereadRecommendations",
-    key,
-    properties: {
-      Title: Builder.title(safeText(book.title, key)),
-      "Recommendation Key": Builder.richText(key),
-      Source: Builder.select("Personalized"),
-      Book: bookId ? [Builder.relation(bookId)] : [],
-      Author: Builder.richText(safeText(book.author)),
-      Reason: Builder.richText(safeText(item.reason)),
-      Rating: Builder.number(toNumber(numberAt(book, "newRating") ?? numberAt(item, "newRating"))),
-      "Reading Count": Builder.number(toNumber(numberAt(item, "readingCount"))),
-      Cover: Builder.url(safeText(book.cover)),
-      "Open in WeRead": Builder.url(bookId ? openBookUrl(bookId) : ""),
-      "Raw JSON": Builder.richText(rawJson(item)),
-    },
-  };
-}
-
-function buildPublicReviewChange(bookId: string, wrapped: JsonRecord) {
-  const review = normalizePublicReview(wrapped);
-  if (!review.reviewId && !review.content) return undefined;
-  const key = `public:${review.reviewId ?? `${bookId}:${review.createTime ?? ""}`}`;
-  const author = objectAt(review, "author");
-  return {
-    type: "upsert" as const,
-    targetDatabaseKey: "wereadPublicReviews",
-    key,
-    properties: {
-      Text: Builder.title(truncate(safeText(review.content, key), 180)),
-      "Review Key": Builder.richText(key),
-      Book: [Builder.relation(bookId)],
-      Author: Builder.richText(safeText(author.name)),
-      Rating: Builder.number(toNumber(review.star)),
-      Created: buildDate(review.createTime),
-      "Finished Book": Builder.checkbox(review.isFinish === 1),
-      "Raw JSON": Builder.richText(rawJson(wrapped)),
-    },
-  };
-}
-
 async function fetchAllNotebooks(): Promise<NotebookBook[]> {
   const books: NotebookBook[] = [];
   let lastSort: number | undefined;
@@ -690,26 +589,6 @@ async function fetchAllReviews(bookId: string): Promise<Review[]> {
   }
 }
 
-async function fetchPublicReviews(bookId: string): Promise<JsonRecord[]> {
-  if (MAX_PUBLIC_REVIEWS_PER_BOOK <= 0) return [];
-  const result = await wereadRequest<{ reviews?: JsonRecord[] }>({
-    api_name: "/review/list",
-    bookId,
-    reviewListType: 0,
-    count: Math.min(MAX_PUBLIC_REVIEWS_PER_BOOK, REVIEW_PAGE_SIZE),
-  }).catch(() => undefined);
-  return result?.reviews ?? [];
-}
-
-async function fetchRecommendations(): Promise<JsonRecord[]> {
-  if (MAX_RECOMMENDATIONS <= 0) return [];
-  const result = await wereadRequest<{ books?: JsonRecord[] }>({
-    api_name: "/book/recommend",
-    count: Math.min(MAX_RECOMMENDATIONS, 50),
-  }).catch(() => undefined);
-  return result?.books ?? [];
-}
-
 async function fetchReadingStats(): Promise<JsonRecord[]> {
   const modes = ["weekly", "monthly", "annually", "overall"];
   const results = await Promise.all(
@@ -741,7 +620,6 @@ async function wereadRequest<T>(body: JsonRecord): Promise<T> {
 function collectKnownBooks(
   notebooks: NotebookBook[],
   shelf: JsonRecord,
-  recommendations: JsonRecord[],
 ): Map<string, WeReadBook> {
   const result = new Map<string, WeReadBook>();
   for (const notebook of notebooks) {
@@ -753,18 +631,7 @@ function collectKnownBooks(
     const bookId = safeText(item.bookId);
     if (bookId && !result.has(bookId)) result.set(bookId, item as WeReadBook);
   }
-  for (const item of recommendations) {
-    const book = (objectAt(item, "bookInfo").bookId ? objectAt(item, "bookInfo") : item) as WeReadBook;
-    const bookId = safeText(book.bookId);
-    if (bookId && !result.has(bookId)) result.set(bookId, book);
-  }
   return result;
-}
-
-function normalizePublicReview(wrapped: JsonRecord): Review {
-  const a = objectAt(wrapped, "review");
-  const b = objectAt(a, "review");
-  return (Object.keys(b).length ? b : a) as Review;
 }
 
 function buildNotePageContent(input: {
@@ -842,11 +709,6 @@ function statusFor(markedStatus?: number, progress?: number) {
   if (markedStatus === 1 || progress === 100) return "Finished";
   if (markedStatus === 0 || (progress !== undefined && progress > 0)) return "Reading";
   return "Unknown";
-}
-
-function numberEnv(name: string, fallback: number) {
-  const value = Number(process.env[name]);
-  return Number.isFinite(value) ? value : fallback;
 }
 
 function toNumber(value?: number) {

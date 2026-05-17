@@ -1,6 +1,6 @@
 # 微信读书 Notion Worker
 
-这个项目用于把微信读书 Skill API 当前开放的信息同步到 Notion Worker 托管数据库。
+这个项目用于把微信读书 Skill API 中属于你个人账号的数据同步到 Notion Worker 托管数据库。
 
 ## 会创建什么
 
@@ -9,8 +9,6 @@
 - `WeRead Chapters`：章节目录，包含章节 UID、层级、字数、付费状态和章节跳转链接。
 - `WeRead Shelf`：书架条目，包含电子书、专辑/有声书、文章收藏入口和书单归档。
 - `WeRead Reading Stats`：本周、本月、本年、总计四类阅读统计。
-- `WeRead Recommendations`：微信读书“为你推荐”返回的推荐书籍。
-- `WeRead Public Reviews`：从相关书籍拉取的公开点评。
 
 多数数据库都包含 `Raw JSON` 字段，用来保存 API 返回的原始数据片段，避免字段遗漏。每条笔记都会保存一个 `weread://` 深度链接。具备 `chapterUid` 和 `range` 的划线或想法，可以从 Notion 跳回微信读书 App 的原文位置；无法定位到具体位置的整本书评论，会回退为打开对应书籍。
 
@@ -52,18 +50,6 @@ notion workers env set SYNC_SCHEDULE
 
 如果不配置 `SYNC_SCHEDULE`，默认每 6 小时同步一次。
 
-可选：限制公开点评抓取数量。默认每本相关书籍抓取 20 条公开点评；设为 0 可关闭：
-
-```bash
-notion workers env set MAX_PUBLIC_REVIEWS_PER_BOOK
-```
-
-可选：限制“为你推荐”抓取数量。默认抓取 24 条；设为 0 可关闭：
-
-```bash
-notion workers env set MAX_RECOMMENDATIONS
-```
-
 ## 部署
 
 使用你现有的 Notion Worker 部署流程部署即可。部署后，Worker 会创建并维护两张托管数据库：
@@ -88,15 +74,19 @@ npm run typecheck
 - 章节：目录、层级、字数、付费状态
 - 笔记：划线原文、个人想法、整本书评论
 - 阅读统计：本周、本月、本年、总计
-- 推荐：为你推荐
-- 公开点评：从书架、笔记和推荐中的相关书籍拉取
 - 原始数据：核心记录保留 `Raw JSON`
 - 跳转链接：跳回微信读书原文、章节或书籍的深度链接
+
+不会同步的内容：
+
+- 公开点评，包括其他用户对书籍的评论
+- 热门划线、热门划线下的公开想法
+- 为你推荐、相似推荐、搜索结果
+- 任何不能通过当前 API Key 识别为你个人账号的数据
 
 ## 注意事项
 
 - Notion Worker sync 当前会创建和管理自己的数据库，不能直接把同步数据写入你已有的 Notion 数据库。
 - 微信读书当前接口不能导出普通书签内容，只能读取书签数量；可导出的内容是划线、想法和评论。
-- 搜索接口需要关键词，无法自动“全网枚举”；相似书推荐需要指定来源书籍，本项目当前不做无限扩散抓取。
-- 公开点评和推荐可能增加 API 调用量，可以用环境变量调小或关闭。
+- 项目只调用个人数据相关接口，不调用 `/review/list`、`/book/recommend`、`/book/bestbookmarks`、`/book/readreviews` 等公开或推荐类接口。
 - 不要把 `WEREAD_API_KEY` 写入代码或提交到 GitHub。项目里的 `.env.example` 只是占位示例。
