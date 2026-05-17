@@ -211,13 +211,34 @@ const statsDatabase = worker.database("wereadStats", {
         { name: "monthly", color: "green" },
         { name: "annually", color: "yellow" },
         { name: "overall", color: "purple" },
-        { name: "status", color: "gray" },
       ]),
       "Base Time": Schema.date(),
       "Read Days": Schema.number(),
       "Total Seconds": Schema.number(),
       "Average Seconds": Schema.number(),
       "Read Rate": Schema.number(),
+      "Raw JSON": Schema.richText(),
+    },
+  },
+});
+
+const syncStatusDatabase = worker.database("wereadSyncStatus", {
+  type: "managed",
+  initialTitle: "WeRead Sync Status",
+  primaryKeyProperty: "Status Key",
+  schema: {
+    properties: {
+      Name: Schema.title(),
+      "Status Key": Schema.richText(),
+      Result: Schema.select([
+        { name: "OK", color: "green" },
+        { name: "Errors", color: "red" },
+      ]),
+      "Synced At": Schema.date(),
+      "Notebook Books": Schema.number(),
+      "Shelf Items": Schema.number(),
+      "Stats Modes": Schema.number(),
+      "Error Count": Schema.number(),
       "Raw JSON": Schema.richText(),
     },
   },
@@ -520,7 +541,7 @@ function buildStatsChange(item: JsonRecord) {
   const key = `${mode}:${baseTime ?? 0}`;
   return {
     type: "upsert" as const,
-    targetDatabaseKey: "wereadStats",
+    targetDatabaseKey: "wereadSyncStatus",
     key,
     properties: {
       Name: Builder.title(`${mode} reading stats`),
@@ -561,13 +582,13 @@ function buildSyncStatusChange(input: {
     key: "sync-status:latest",
     properties: {
       Name: Builder.title(input.errors.length ? "Sync Status - Errors" : "Sync Status - OK"),
-      "Stats Key": Builder.richText("sync-status:latest"),
-      Mode: Builder.select("status"),
-      "Base Time": Builder.date(new Date().toISOString().slice(0, 10)),
-      "Read Days": Builder.number(input.notebooks.length),
-      "Total Seconds": Builder.number(books.length + albums.length + mpCount),
-      "Average Seconds": Builder.number(input.stats.length),
-      "Read Rate": Builder.number(input.errors.length),
+      "Status Key": Builder.richText("sync-status:latest"),
+      Result: Builder.select(input.errors.length ? "Errors" : "OK"),
+      "Synced At": Builder.date(new Date().toISOString().slice(0, 10)),
+      "Notebook Books": Builder.number(input.notebooks.length),
+      "Shelf Items": Builder.number(books.length + albums.length + mpCount),
+      "Stats Modes": Builder.number(input.stats.length),
+      "Error Count": Builder.number(input.errors.length),
       "Raw JSON": Builder.richText(rawJson(summary)),
     },
   };
