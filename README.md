@@ -9,6 +9,7 @@
 - `WeRead Chapters`：章节目录，包含章节 UID、层级、字数、付费状态和章节跳转链接。
 - `WeRead Shelf`：书架条目，包含电子书、专辑/有声书、文章收藏入口和书单归档。
 - `WeRead Reading Stats`：本周、本月、本年、总计四类阅读统计。
+- `WeRead Reading Stats` 中还会写入一条 `Sync Status - OK/Errors` 记录，用于排查最近一次同步是否成功。
 
 多数数据库都包含 `Raw JSON` 字段，用来保存 API 返回的原始数据片段，避免字段遗漏。每条笔记都会保存一个 `weread://` 深度链接。具备 `chapterUid` 和 `range` 的划线或想法，可以从 Notion 跳回微信读书 App 的原文位置；无法定位到具体位置的整本书评论，会回退为打开对应书籍。
 
@@ -90,3 +91,23 @@ npm run typecheck
 - 微信读书当前接口不能导出普通书签内容，只能读取书签数量；可导出的内容是划线、想法和评论。
 - 项目只调用个人数据相关接口，不调用 `/review/list`、`/book/recommend`、`/book/bestbookmarks`、`/book/readreviews` 等公开或推荐类接口。
 - 不要把 `WEREAD_API_KEY` 写入代码或提交到 GitHub。项目里的 `.env.example` 只是占位示例。
+
+## 排查同步为空
+
+如果部署后只创建数据库、没有任何记录：
+
+1. 查看 `WeRead Reading Stats` 里是否有 `Sync Status - OK/Errors`。
+2. 如果没有这条记录，说明 Worker 运行阶段可能还没触发，先查看运行日志。
+3. 如果有 `Sync Status - Errors`，打开 `Raw JSON` 查看哪个接口失败。
+4. 重新部署后建议重置 sync 状态：
+
+```bash
+ntn workers sync state reset wereadOpenApiSync
+```
+
+5. 查看最近运行：
+
+```bash
+ntn workers runs list
+ntn workers runs logs <run-id>
+```

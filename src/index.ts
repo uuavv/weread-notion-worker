@@ -8,6 +8,7 @@ export default worker;
 const WEREAD_API_URL = "https://i.weread.qq.com/api/agent/gateway";
 const SKILL_VERSION = "1.0.3";
 const PAGE_SIZE = 100;
+const ERROR_TEXT_LIMIT = 500;
 
 type JsonRecord = Record<string, unknown>;
 
@@ -210,6 +211,7 @@ const statsDatabase = worker.database("wereadStats", {
         { name: "monthly", color: "green" },
         { name: "annually", color: "yellow" },
         { name: "overall", color: "purple" },
+        { name: "status", color: "gray" },
       ]),
       "Base Time": Schema.date(),
       "Read Days": Schema.number(),
@@ -232,14 +234,20 @@ worker.sync("wereadOpenApiSync", {
   schedule: (process.env.SYNC_SCHEDULE ?? "6h") as "6h",
   execute: async () => {
     const changes: JsonRecord[] = [];
-    const [notebooks, shelf, stats] = await Promise.all([
-      fetchAllNotebooks(),
-      fetchShelf(),
-      fetchReadingStats(),
-    ]);
+    const errors: string[] = [];
+    const notebooks = await fetchAllNotebooks().catch((error: unknown) => {
+      errors.push(`notebooks: ${errorMessage(error)}`);
+      return [] as NotebookBook[];
+    });
+    const shelf = await fetchShelf().catch((error: unknown) => {
+      errors.push(`shelf: ${errorMessage(error)}`);
+      return {} as JsonRecord;
+    });
+    const stats = await fetchReadingStats(errors);
 
     changes.push(...buildShelfChanges(shelf));
     changes.push(...stats.map(buildStatsChange));
+    changes.push(buildSyncStatusChange({ notebooks, shelf, stats, errors }));
 
     const knownBooks = collectKnownBooks(notebooks, shelf);
 
@@ -528,6 +536,43 @@ function buildStatsChange(item: JsonRecord) {
   };
 }
 
+function buildSyncStatusChange(input: {
+  notebooks: NotebookBook[];
+  shelf: JsonRecord;
+  stats: JsonRecord[];
+  errors: string[];
+}) {
+  const books = arrayAt(input.shelf, "books");
+  const albums = arrayAt(input.shelf, "albums");
+  const mpCount = input.shelf.mp && typeof input.shelf.mp === "object" ? 1 : 0;
+  const summary = {
+    syncedAt: new Date().toISOString(),
+    notebookBooks: input.notebooks.length,
+    shelfBooks: books.length,
+    shelfAlbums: albums.length,
+    shelfMpEntries: mpCount,
+    statsModes: input.stats.map((item) => item.mode),
+    errors: input.errors,
+  };
+
+  return {
+    type: "upsert" as const,
+    targetDatabaseKey: "wereadStats",
+    key: "sync-status:latest",
+    properties: {
+      Name: Builder.title(input.errors.length ? "Sync Status - Errors" : "Sync Status - OK"),
+      "Stats Key": Builder.richText("sync-status:latest"),
+      Mode: Builder.select("status"),
+      "Base Time": Builder.date(new Date().toISOString().slice(0, 10)),
+      "Read Days": Builder.number(input.notebooks.length),
+      "Total Seconds": Builder.number(books.length + albums.length + mpCount),
+      "Average Seconds": Builder.number(input.stats.length),
+      "Read Rate": Builder.number(input.errors.length),
+      "Raw JSON": Builder.richText(rawJson(summary)),
+    },
+  };
+}
+
 async function fetchAllNotebooks(): Promise<NotebookBook[]> {
   const books: NotebookBook[] = [];
   let lastSort: number | undefined;
@@ -589,14 +634,20 @@ async function fetchAllReviews(bookId: string): Promise<Review[]> {
   }
 }
 
-async function fetchReadingStats(): Promise<JsonRecord[]> {
+async function fetchReadingStats(errors: string[]): Promise<JsonRecord[]> {
   const modes = ["weekly", "monthly", "annually", "overall"];
-  const results = await Promise.all(
-    modes.map((mode) =>
-      wereadRequest<JsonRecord>({ api_name: "/readdata/detail", mode }).then((result) => ({ ...result, mode })),
-    ),
+  const results = await Promise.allSettled(
+    modes.map((mode) => wereadRequest<JsonRecord>({ api_name: "/readdata/detail", mode })),
   );
-  return results;
+  return results.flatMap((result, index) => {
+    const mode = modes[index];
+    if (result.status === "fulfilled") {
+      return [{ ...result.value, mode }];
+    }
+
+    errors.push(`stats:${mode}: ${errorMessage(result.reason)}`);
+    return [];
+  });
 }
 
 async function wereadRequest<T>(body: JsonRecord): Promise<T> {
@@ -725,6 +776,11 @@ function truncate(value: string, maxLength: number) {
 
 function rawJson(value: unknown) {
   return truncate(JSON.stringify(value), 1900);
+}
+
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return truncate(error.message, ERROR_TEXT_LIMIT);
+  return truncate(String(error), ERROR_TEXT_LIMIT);
 }
 
 function objectAt(value: unknown, key: string): JsonRecord {
