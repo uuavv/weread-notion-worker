@@ -10,6 +10,7 @@ const SKILL_VERSION = "1.0.3";
 const PAGE_SIZE = 100;
 const ERROR_TEXT_LIMIT = 500;
 const BOOKS_PER_EXECUTION = numberEnv("BOOKS_PER_EXECUTION", 3);
+const NOTEBOOK_SCAN_PAGES = numberEnv("NOTEBOOK_SCAN_PAGES", 2);
 
 type JsonRecord = Record<string, unknown>;
 
@@ -17,6 +18,7 @@ type SyncState = {
   entries: BookEntry[];
   index: number;
   errors: string[];
+  fullRefresh: boolean;
 };
 
 type BookEntry = {
@@ -273,7 +275,8 @@ worker.sync("wereadOpenApiSync", {
     let index = state?.index ?? 0;
 
     if (!entries) {
-      const notebooks = await fetchAllNotebooks().catch((error: unknown) => {
+      const fullRefresh = shouldRunFullRefresh();
+      const notebooks = await fetchRecentNotebooks(fullRefresh ? Number.POSITIVE_INFINITY : NOTEBOOK_SCAN_PAGES).catch((error: unknown) => {
         errors.push(`notebooks: ${errorMessage(error)}`);
         return [] as NotebookBook[];
       });
@@ -285,7 +288,7 @@ worker.sync("wereadOpenApiSync", {
 
       changes.push(...buildShelfChanges(shelf));
       changes.push(...stats.map(buildStatsChange));
-      entries = collectKnownBookEntries(notebooks, shelf);
+      entries = collectKnownBookEntries(notebooks, shelf, fullRefresh);
       changes.push(
         buildSyncStatusChange({
           entries,
@@ -293,6 +296,7 @@ worker.sync("wereadOpenApiSync", {
           stats,
           errors,
           done: entries.length === 0,
+          fullRefresh,
         }),
       );
     }
@@ -334,13 +338,14 @@ worker.sync("wereadOpenApiSync", {
         stats: [],
         errors,
         done: !hasMore,
+        fullRefresh: state?.fullRefresh ?? false,
       }),
     );
 
     return {
       changes: changes as never,
       hasMore,
-      nextState: hasMore ? { entries, index, errors } : undefined,
+      nextState: hasMore ? { entries, index, errors, fullRefresh: state?.fullRefresh ?? false } : undefined,
     };
   },
 });
@@ -605,12 +610,16 @@ function buildSyncStatusChange(input: {
   stats: JsonRecord[];
   errors: string[];
   done: boolean;
+  fullRefresh: boolean;
 }) {
   const summary = {
     syncedAt: new Date().toISOString(),
     totalBooks: input.entries.length,
     processedBooks: input.processed,
     done: input.done,
+    fullRefresh: input.fullRefresh,
+    notebookScanPages: NOTEBOOK_SCAN_PAGES,
+    booksPerExecution: BOOKS_PER_EXECUTION,
     statsModes: input.stats.map((item) => item.mode),
     errors: input.errors,
   };
@@ -633,16 +642,18 @@ function buildSyncStatusChange(input: {
   };
 }
 
-async function fetchAllNotebooks(): Promise<NotebookBook[]> {
+async function fetchRecentNotebooks(maxPages: number): Promise<NotebookBook[]> {
   const books: NotebookBook[] = [];
   let lastSort: number | undefined;
+  let pages = 0;
   for (;;) {
     const body: JsonRecord = { api_name: "/user/notebooks", count: PAGE_SIZE };
     if (lastSort !== undefined) body.lastSort = lastSort;
     const result = await wereadRequest<{ books?: NotebookBook[]; hasMore?: number }>(body);
+    pages += 1;
     const pageBooks = result.books ?? [];
     books.push(...pageBooks);
-    if (!result.hasMore || pageBooks.length === 0) return books;
+    if (!result.hasMore || pageBooks.length === 0 || pages >= maxPages) return books;
     lastSort = pageBooks.at(-1)?.sort;
     if (lastSort === undefined) return books;
   }
@@ -731,6 +742,7 @@ async function wereadRequest<T>(body: JsonRecord): Promise<T> {
 function collectKnownBookEntries(
   notebooks: NotebookBook[],
   shelf: JsonRecord,
+  fullRefresh: boolean,
 ): BookEntry[] {
   const result = new Map<string, BookEntry>();
   for (const notebook of notebooks) {
@@ -738,9 +750,11 @@ function collectKnownBookEntries(
     const bookId = notebook.bookId ?? book.bookId;
     if (bookId) result.set(bookId, { bookId, seed: { ...book, bookId }, notebook });
   }
-  for (const item of arrayAt(shelf, "books")) {
-    const bookId = safeText(item.bookId);
-    if (bookId && !result.has(bookId)) result.set(bookId, { bookId, seed: item as WeReadBook });
+  if (fullRefresh) {
+    for (const item of arrayAt(shelf, "books")) {
+      const bookId = safeText(item.bookId);
+      if (bookId && !result.has(bookId)) result.set(bookId, { bookId, seed: item as WeReadBook });
+    }
   }
   return [...result.values()];
 }
@@ -820,6 +834,11 @@ function statusFor(markedStatus?: number, progress?: number) {
   if (markedStatus === 1 || progress === 100) return "Finished";
   if (markedStatus === 0 || (progress !== undefined && progress > 0)) return "Reading";
   return "Unknown";
+}
+
+function shouldRunFullRefresh() {
+  const value = process.env.FULL_REFRESH;
+  return value === "1" || value === "true" || value === "yes";
 }
 
 function numberEnv(name: string, fallback: number) {

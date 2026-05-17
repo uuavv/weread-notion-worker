@@ -57,6 +57,27 @@ notion workers env set SYNC_SCHEDULE
 ntn workers env set BOOKS_PER_EXECUTION=2
 ```
 
+默认同步只处理最近有笔记变动的书，不会每次扫描整个书架。可选配置最近笔记页数，默认 2 页，每页最多 100 本有笔记的书：
+
+```bash
+ntn workers env set NOTEBOOK_SCAN_PAGES=2
+```
+
+如果第一次部署想补齐整个书架所有书，可以临时开启全量刷新；全量完成后建议关闭：
+
+```bash
+ntn workers env set FULL_REFRESH=1
+ntn workers deploy
+ntn workers sync state reset wereadOpenApiSync
+```
+
+全量跑完后关闭：
+
+```bash
+ntn workers env set FULL_REFRESH=0
+ntn workers deploy
+```
+
 ## 部署
 
 使用你现有的 Notion Worker 部署流程部署即可。部署后，Worker 会创建并维护两张托管数据库：
@@ -96,6 +117,7 @@ npm run typecheck
 - Notion Worker sync 当前会创建和管理自己的数据库，不能直接把同步数据写入你已有的 Notion 数据库。
 - 微信读书当前接口不能导出普通书签内容，只能读取书签数量；可导出的内容是划线、想法和评论。
 - 项目只调用个人数据相关接口，不调用 `/review/list`、`/book/recommend`、`/book/bestbookmarks`、`/book/readreviews` 等公开或推荐类接口。
+- 默认只同步最近有笔记变动的书籍；书架本身会更新，但不会每次对书架里的每一本书都查询详情、章节、划线和点评。
 - 不要把 `WEREAD_API_KEY` 写入代码或提交到 GitHub。项目里的 `.env.example` 只是占位示例。
 
 ## 排查同步为空
